@@ -132,11 +132,11 @@ export class TagCache {
             const pipe = this.redis.multi();
 
             for (const key of keys) {
-                pipe.del(this.key(key)).then(ignore).catch(ignore);
+                pipe.del(this.key(key));
             }
 
             for (const tag of tags) {
-                pipe.del(this.key(`tag:${tag}`)).then(ignore).catch(ignore);
+                pipe.del(this.key(`tag:${tag}`));
             }
 
             await pipe.exec();
