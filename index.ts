@@ -128,23 +128,26 @@ export class TagCache {
      */
     public async invalidate(...tags: string[]): Promise<boolean> {
         try {
-            const keys: string[] = ([] as string[]).concat(
-                await Promise.all(tags.map(tag =>
-                    this.redis.smembers(this.key(`tag:${tag})`)) as any as
-                        Promise<string>
-                )) as any as string[],
-            );
+            const tagKeys = tags.map(tag => this.key(`tag:${tag}`));
+            const keys: string[] = (await Promise.all(
+                tagKeys.map(tag => this.redis.smembers(tag)),
+            ) || []) as unknown as string[];
+
+            if (!keys.length) {
+                // nothing to do, no keys found
+                return true;
+            }
 
             const multi = this.redis.multi();
 
             for (const key of keys) {
                 // noinspection ES6MissingAwait
-                multi.del(this.key(key));
-            }
+                multi.del(key);
 
-            for (const tag of tags) {
-                // noinspection ES6MissingAwait
-                multi.del(this.key(`tag:${tag}`));
+                // remove key from tags
+                for (const tag of tagKeys) {
+                    multi.srem(tag, key);
+                }
             }
 
             await multi.exec();
