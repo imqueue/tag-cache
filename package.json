@@ -38,7 +38,7 @@
   "author": "imqueue.com <support@imqueue.com>",
   "license": "ISC",
   "dependencies": {
-    "@imqueue/rpc": "^1.10.7"
+    "@imqueue/rpc": "^1.10.8"
   },
   "devDependencies": {
     "@types/chai": "^4.2.11",

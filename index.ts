@@ -140,7 +140,13 @@ export class TagCache {
 
             const multi = this.redis.multi();
 
-            for (const key of keys) {
+            for (let key of keys) {
+                key = String(key).trim();
+
+                if (!key) {
+                    continue ;
+                }
+
                 // noinspection ES6MissingAwait
                 multi.del(key);
 
