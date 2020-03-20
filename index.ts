@@ -16,6 +16,7 @@
  * PERFORMANCE OF THIS SOFTWARE.
  */
 import { ILogger, IRedisClient, RedisCache } from '@imqueue/rpc';
+import { Multi } from 'redis';
 
 /**
  * Empty function used to ignore promises, for cases, when we do not care
@@ -68,7 +69,7 @@ export class TagCache {
                 value ? JSON.parse(value) : null
             );
         } catch (err) {
-            this.logger.warn('Cache get error:', err.stack);
+            this.logger.warn('TagCache: get error:', err.stack);
 
             return null;
         }
@@ -90,7 +91,7 @@ export class TagCache {
         ttl?: number,
     ): Promise<boolean> {
         try {
-            const multi = this.redis.multi();
+            const multi: Multi = this.redis.multi();
             const setKey = this.key(key);
 
             for (const tag of tags) {
@@ -113,7 +114,7 @@ export class TagCache {
 
             return true;
         } catch (err) {
-            this.logger.warn('Cache set error:', err.stack);
+            this.logger.warn('TagCache: set error:', err.stack);
 
             return false;
         }
@@ -129,38 +130,43 @@ export class TagCache {
     public async invalidate(...tags: string[]): Promise<boolean> {
         try {
             const tagKeys = tags.map(tag => this.key(`tag:${tag}`));
-            const keys: string[] = (await Promise.all(
-                tagKeys.map(tag => this.redis.smembers(tag)),
-            ) || []) as unknown as string[];
+            const keys: string[] = [...new Set(([] as string[]).concat(
+                ...await Promise.all(
+                    tagKeys.map(tag => this.redis.smembers(tag))
+                ) as unknown as string[]
+            ))];
 
             if (!keys.length) {
                 // nothing to do, no keys found
                 return true;
             }
 
-            const multi = this.redis.multi();
+            const multi: Multi = this.redis.multi();
+            let cursor = '0';
 
-            for (let key of keys) {
-                key = String(key).trim();
+            multi.del(...keys);
 
-                if (!key) {
-                    continue ;
+            do {
+                const reply: any[] = (await this.redis.scan(
+                    cursor,
+                    'MATCH',
+                    this.key('tag:*'),
+                    'COUNT',
+                    '1000',
+                )) as unknown as any[];
+
+                cursor = reply[0];
+
+                for (const tag of reply[1]) {
+                    multi.srem(tag, ...keys);
                 }
+            } while (cursor !== '0');
 
-                // noinspection ES6MissingAwait
-                multi.del(key);
-
-                // remove key from tags
-                for (const tag of tagKeys) {
-                    multi.srem(tag, key);
-                }
-            }
-
-            await multi.exec();
+            multi.exec();
 
             return true;
         } catch (err) {
-            this.logger.warn('Cache invalidate error:', err.stack);
+            this.logger.warn('TagCache: invalidate error:', err.stack);
 
             return false;
         }
