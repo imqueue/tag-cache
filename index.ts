@@ -52,7 +52,7 @@ export class TagCache {
      */
     public async get(
         ...keys: string[]
-    ): Promise<any | null | Array<any | null>> {
+    ): Promise<any | null | (any | null)[]> {
         try {
             if (keys.length === 1) {
                 const value: string = await this.redis.get(
@@ -94,7 +94,13 @@ export class TagCache {
             const setKey = this.key(key);
 
             for (const tag of tags) {
-                multi.sadd(this.key(`tag:${tag}`), setKey);
+                const tagKey = this.key(`tag:${tag}`);
+
+                multi.sadd(tagKey, setKey);
+
+                if (ttl) {
+                    multi.pexpire(tagKey, ttl);
+                }
             }
 
             if (ttl) {
@@ -129,17 +135,19 @@ export class TagCache {
                 )) as any as string[],
             );
 
-            const pipe = this.redis.multi();
+            const multi = this.redis.multi();
 
             for (const key of keys) {
-                pipe.del(this.key(key));
+                // noinspection ES6MissingAwait
+                multi.del(this.key(key));
             }
 
             for (const tag of tags) {
-                pipe.del(this.key(`tag:${tag}`));
+                // noinspection ES6MissingAwait
+                multi.del(this.key(`tag:${tag}`));
             }
 
-            await pipe.exec();
+            await multi.exec();
 
             return true;
         } catch (err) {
