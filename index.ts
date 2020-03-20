@@ -26,16 +26,16 @@ function ignore() { /* do nothing */ }
 // noinspection JSUnusedGlobalSymbols
 export class TagCache {
 
-    private logger: ILogger;
-    private redis: IRedisClient;
-    private readonly key: (key: string) => string;
+    public logger: ILogger;
+    public redis: IRedisClient;
+    public readonly key: (key: string) => string;
 
     // noinspection TypeScriptUnresolvedVariable,JSUnusedGlobalSymbols
     /**
      * @constructor
      * @param {RedisCache} cache
      */
-    constructor(private cache: RedisCache) {
+    constructor(public cache: RedisCache) {
         this.logger = (this.cache as any).logger;
         this.redis = (RedisCache as any).redis;
         this.key = (this.cache as any).key.bind(this.cache);
