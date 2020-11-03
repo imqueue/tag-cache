@@ -18,6 +18,8 @@
 import { ILogger, IRedisClient, RedisCache } from '@imqueue/rpc';
 import { Multi } from 'redis';
 
+export const REDIS_INIT_ERROR = 'Redis engine is not initialized!';
+
 /**
  * Empty function used to ignore promises, for cases, when we do not care
  * about results and just want to execute some routines in background
@@ -28,7 +30,7 @@ function ignore() { /* do nothing */ }
 export class TagCache {
 
     public logger: ILogger;
-    public redis: IRedisClient;
+    public redis?: IRedisClient;
     public readonly key: (key: string) => string;
 
     // noinspection TypeScriptUnresolvedVariable,JSUnusedGlobalSymbols
@@ -36,7 +38,7 @@ export class TagCache {
      * @constructor
      * @param {RedisCache} cache
      */
-    constructor(public cache: RedisCache) {
+    constructor(public cache?: RedisCache) {
         this.logger = (this.cache as any).logger;
         this.redis = (RedisCache as any).redis;
         this.key = (this.cache as any).key.bind(this.cache);
@@ -54,6 +56,10 @@ export class TagCache {
     public async get(
         ...keys: string[]
     ): Promise<any | null | (any | null)[]> {
+        if (!this.redis) {
+            throw new TypeError(REDIS_INIT_ERROR);
+        }
+
         try {
             if (keys.length === 1) {
                 const value: string = await this.redis.get(
@@ -90,6 +96,10 @@ export class TagCache {
         tags: string[],
         ttl?: number,
     ): Promise<boolean> {
+        if (!this.redis) {
+            throw new TypeError(REDIS_INIT_ERROR);
+        }
+
         try {
             const multi: Multi = this.redis.multi();
             const setKey = this.key(key);
@@ -128,11 +138,21 @@ export class TagCache {
      * @return {Promise<boolean>}
      */
     public async invalidate(...tags: string[]): Promise<boolean> {
+        if (!this.redis) {
+            throw new TypeError(REDIS_INIT_ERROR);
+        }
+
         try {
             const tagKeys = tags.map(tag => this.key(`tag:${tag}`));
             const keys: string[] = [...new Set(([] as string[]).concat(
                 ...await Promise.all(
-                    tagKeys.map(tag => this.redis.smembers(tag))
+                    tagKeys.map(tag => {
+                        if (!this.redis) {
+                            throw new TypeError(REDIS_INIT_ERROR);
+                        }
+
+                        this.redis.smembers(tag);
+                    }),
                 ) as unknown as string[]
             ))];
 
