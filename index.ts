@@ -152,6 +152,8 @@ export class TagCache {
                         }
 
                         this.redis.smembers(tag);
+
+                        return tag;
                     }),
                 ) as unknown as string[]
             ))];
