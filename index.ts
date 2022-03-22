@@ -147,13 +147,18 @@ export class TagCache {
             const keys: string[] = [...new Set(([] as string[]).concat(
                 ...await Promise.all(
                     tagKeys.map(tag => {
-                        if (!this.redis) {
+                        const redis = this.redis;
+
+                        if (!redis) {
                             throw new TypeError(REDIS_INIT_ERROR);
                         }
 
-                        this.redis.smembers(tag);
-
-                        return tag;
+                        return new Promise(resolve => {
+                            redis.smembers(
+                                tag,
+                                ((err, reply) => resolve(reply)),
+                            );
+                        });
                     }),
                 ) as unknown as string[]
             ))];
