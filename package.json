@@ -36,7 +36,7 @@
   },
   "homepage": "https://github.com/imqueue/tag-cache",
   "author": "imqueue.com <support@imqueue.com>",
-  "license": "ISC",
+  "license": "GPL-3.0-only",
   "dependencies": {
     "@imqueue/rpc": "^1.17.0"
   },
