@@ -38,7 +38,7 @@
   "author": "imqueue.com <support@imqueue.com>",
   "license": "GPL-3.0-only",
   "dependencies": {
-    "@imqueue/rpc": "^2.0.17"
+    "@imqueue/rpc": "^2.0.21"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.1",
