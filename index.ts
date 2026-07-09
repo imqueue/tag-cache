@@ -21,8 +21,8 @@
  * purchase a proprietary commercial license. Please contact us at
  * <support@imqueue.com> to get commercial licensing options.
  */
-import { ILogger, RedisCache } from '@imqueue/rpc';
-import { Redis, ChainableCommander } from 'ioredis';
+import { type ILogger, RedisCache } from '@imqueue/rpc';
+import { type ChainableCommander, type Redis } from 'ioredis';
 
 export const REDIS_INIT_ERROR = 'Redis engine is not initialized!';
 
@@ -30,16 +30,15 @@ export const REDIS_INIT_ERROR = 'Redis engine is not initialized!';
  * Empty function used to ignore promises, for cases, when we do not care
  * about results and just want to execute some routines in the background
  */
-function ignore() { /* do nothing */ }
+function ignore() {
+    /* do nothing */
+}
 
-// noinspection JSUnusedGlobalSymbols
 export class TagCache {
-
     public logger: ILogger;
     public redis?: Redis;
     public readonly key: (key: string) => string;
 
-    // noinspection TypeScriptUnresolvedVariable,JSUnusedGlobalSymbols
     /**
      * @constructor
      * @param {RedisCache} cache
@@ -50,7 +49,6 @@ export class TagCache {
         this.key = (this.cache as any).key.bind(this.cache);
     }
 
-    // noinspection JSUnusedGlobalSymbols
     /**
      * Returns data stored under given keys. If a single key provided
      * returns a single result, otherwise it will return an array of results
@@ -59,18 +57,14 @@ export class TagCache {
      * @param {string[]} keys
      * @return Promise<any | null | Array<any | null>>
      */
-    public async get(
-        ...keys: string[]
-    ): Promise<any | null | (any | null)[]> {
+    public async get(...keys: string[]): Promise<any | null | (any | null)[]> {
         if (!this.redis) {
             throw new TypeError(REDIS_INIT_ERROR);
         }
 
         try {
             if (keys.length === 1) {
-                const value = await this.redis.get(
-                    this.key(keys[0]),
-                );
+                const value = await this.redis.get(this.key(keys[0]));
 
                 return value ? JSON.parse(value) : null;
             }
@@ -79,15 +73,14 @@ export class TagCache {
                 keys.map(key => this.key(key)),
             );
 
-            return values.map(value => value ? JSON.parse(value) : null);
+            return values.map(value => (value ? JSON.parse(value) : null));
         } catch (err) {
-            this.logger.warn('TagCache: get error:', err.stack);
+            this.logger.warn('TagCache: get error:', (err as Error).stack);
 
             return null;
         }
     }
 
-    // noinspection JSUnusedGlobalSymbols
     /**
      * Stores given value under a given key, tagging it with the given tags
      *
@@ -130,7 +123,7 @@ export class TagCache {
 
             return true;
         } catch (err) {
-            this.logger.warn('TagCache: set error:', err.stack);
+            this.logger.warn('TagCache: set error:', (err as Error).stack);
 
             return false;
         }
@@ -150,24 +143,27 @@ export class TagCache {
 
         try {
             const tagKeys = tags.map(tag => this.key(`tag:${tag}`));
-            const keys: string[] = [...new Set(([] as string[]).concat(
-                ...await Promise.all(
-                    tagKeys.map(tag => {
-                        const redis = this.redis;
+            const keys: string[] = [
+                ...new Set(
+                    ([] as string[]).concat(
+                        ...((await Promise.all(
+                            tagKeys.map(tag => {
+                                const redis = this.redis;
 
-                        if (!redis) {
-                            throw new TypeError(REDIS_INIT_ERROR);
-                        }
+                                if (!redis) {
+                                    throw new TypeError(REDIS_INIT_ERROR);
+                                }
 
-                        return new Promise(resolve => {
-                            redis.smembers(
-                                tag,
-                                ((_, reply) => resolve(reply)),
-                            );
-                        });
-                    }),
-                ) as unknown as string[],
-            ))];
+                                return new Promise(resolve => {
+                                    redis.smembers(tag, (_, reply) =>
+                                        resolve(reply),
+                                    );
+                                });
+                            }),
+                        )) as unknown as string[]),
+                    ),
+                ),
+            ];
 
             if (!keys.length) {
                 // nothing to do, no keys found
@@ -195,19 +191,26 @@ export class TagCache {
                 }
             } while (cursor !== '0');
 
-            multi.exec().catch(err => this.logger.warn(
-                'TagCache: invalidate error:', err.stack,
-            ));
+            multi
+                .exec()
+                .catch(err =>
+                    this.logger.warn(
+                        'TagCache: invalidate error:',
+                        (err as Error).stack,
+                    ),
+                );
 
             return true;
         } catch (err) {
-            this.logger.warn('TagCache: invalidate error:', err.stack);
+            this.logger.warn(
+                'TagCache: invalidate error:',
+                (err as Error).stack,
+            );
 
             return false;
         }
     }
 
-    // noinspection JSUnusedGlobalSymbols
     /**
      * Destroys this cache instance
      */
