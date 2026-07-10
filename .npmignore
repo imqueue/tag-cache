@@ -35,3 +35,11 @@ debug*
 Dockerfile
 Thumbs.db
 tsconfig.json
+
+*.ts
+!*.d.ts
+
+# Dev/tooling - never part of the published package
+scripts/
+.oxlintrc.json
+.oxfmtrc.json
