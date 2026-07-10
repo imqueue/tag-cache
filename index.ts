@@ -26,14 +26,6 @@ import { type ChainableCommander, type Redis } from 'ioredis';
 
 export const REDIS_INIT_ERROR = 'Redis engine is not initialized!';
 
-/**
- * Empty function used to ignore promises, for cases, when we do not care
- * about results and just want to execute some routines in the background
- */
-function ignore() {
-    /* do nothing */
-}
-
 export class TagCache {
     public logger: ILogger;
     public redis?: Redis;
@@ -89,7 +81,7 @@ export class TagCache {
      * @param {string[]} tags - tag strings to mark data with
      * @param {number} [ttl] - TTL in milliseconds
      */
-    public async set<T = any>(
+    public async set<_T = any>(
         key: string,
         value: any,
         tags: string[],
