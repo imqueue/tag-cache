@@ -26,7 +26,7 @@
   "bugs": {
     "url": "https://github.com/imqueue/tag-cache/issues"
   },
-  "homepage": "https://github.com/imqueue/tag-cache",
+  "homepage": "https://imqueue.org/",
   "author": "imqueue.com <support@imqueue.com>",
   "license": "GPL-3.0-only",
   "dependencies": {
