@@ -21,6 +21,38 @@
  * purchase a proprietary commercial license. Please contact us at
  * <support@imqueue.com> to get commercial licensing options.
  */
+/**
+ * Tagged cache over Redis: every value is stored with a set of tags, and
+ * invalidating a tag drops everything stored under it.
+ *
+ * Start from {@link TagCache}, built on an initialised `RedisCache` from
+ * `@imqueue/rpc`.
+ *
+ * @remarks
+ * This exists for the case plain key-based caching cannot express: one cached
+ * value that several unrelated events should invalidate. Tagging a result with
+ * every entity it derives from means any one of those entities changing drops
+ * it, whatever key it was stored under.
+ *
+ * Reads and writes never throw on a Redis failure — they log and report it in
+ * the return value, so an outage degrades to cache misses. Note that
+ * {@link TagCache.get} returning `null` therefore means "not cached OR lookup
+ * failed", and {@link TagCache.invalidate} resolves once the work is ISSUED, not
+ * once the keys are gone.
+ *
+ * @example
+ * ```typescript
+ * import { RedisCache } from '@imqueue/rpc';
+ * import { TagCache } from '@imqueue/tag-cache';
+ *
+ * const cache = new TagCache(await new RedisCache().init({ prefix: 'app' }));
+ *
+ * await cache.set('user:1:invoices', invoices, ['user:1', 'invoices'], 60000);
+ * await cache.invalidate('user:1'); // drops it, and anything else tagged user:1
+ * ```
+ *
+ * @packageDocumentation
+ */
 import { type ILogger, RedisCache } from '@imqueue/rpc';
 import { type ChainableCommander, type Redis } from 'ioredis';
 
