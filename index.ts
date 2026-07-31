@@ -24,18 +24,82 @@
 import { type ILogger, RedisCache } from '@imqueue/rpc';
 import { type ChainableCommander, type Redis } from 'ioredis';
 
+/**
+ * Message of the `TypeError` thrown by every cache operation when no redis
+ * connection is available — either `RedisCache.init()` was never awaited, or
+ * {@link TagCache.destroy} has already been called on this instance.
+ */
 export const REDIS_INIT_ERROR = 'Redis engine is not initialized!';
 
+/**
+ * Tagged cache over redis: values are stored under their own keys, and each key
+ * is additionally added to a redis set per tag. Invalidating a tag then drops
+ * every value that was stored with it, which is what plain key-based caching
+ * cannot express — one write can be invalidated by any of several unrelated
+ * events.
+ *
+ * The typical use is caching a computed result that depends on several entities
+ * and dropping it when any one of them changes:
+ *
+ * ```typescript
+ * import { RedisCache } from '@imqueue/rpc';
+ * import { TagCache } from '@imqueue/tag-cache';
+ *
+ * const cache = new TagCache(await new RedisCache().init({ prefix: 'app' }));
+ *
+ * await cache.set('user:1:invoices', invoices, ['user:1', 'invoices'], 60000);
+ *
+ * // later, when user 1 changes — drops the entry above and anything else
+ * // tagged 'user:1', whatever key it was stored under
+ * await cache.invalidate('user:1');
+ * ```
+ *
+ * Two things to know before relying on it. Read and write operations do NOT
+ * throw on a redis failure: they log a warning and report the failure in their
+ * return value, so a cache outage degrades to cache misses instead of taking
+ * the caller down. And the underlying redis connection is shared and owned by
+ * `RedisCache`, so {@link TagCache.destroy} tears it down for every instance —
+ * see that method.
+ */
 export class TagCache {
+    /**
+     * Logger inherited from the underlying `RedisCache`. Every swallowed redis
+     * error is reported through it at warning level.
+     */
     public logger: ILogger;
+
+    /**
+     * Shared `ioredis` connection taken from `RedisCache` at construction
+     * time. Absent until `RedisCache.init()` has been awaited, and deleted
+     * again by {@link TagCache.destroy} — while it is absent every operation
+     * throws a `TypeError` carrying {@link REDIS_INIT_ERROR}.
+     */
     public redis?: Redis;
+
+    /**
+     * Maps a caller-supplied key onto the fully-qualified redis key, applying
+     * the prefix the underlying `RedisCache` was initialised with. Bound to
+     * that cache, so it is safe to pass around detached.
+     */
     public readonly key: (key: string) => string;
 
     /**
-     * @constructor
-     * @param {RedisCache} cache
+     * @param cache - initialised `RedisCache` to borrow the connection, key
+     *                prefix and logger from. `RedisCache.init()` must already
+     *                have been awaited: this reads the connection immediately
+     *                rather than lazily, so an uninitialised cache leaves every
+     *                operation throwing {@link REDIS_INIT_ERROR}.
      */
-    constructor(public cache?: RedisCache) {
+    constructor(
+        /**
+         * The `RedisCache` this instance borrows its connection, key prefix and
+         * logger from. Deleted by {@link TagCache.destroy}. Documented here
+         * rather than above the constructor because it is a parameter property,
+         * and that is the only place a doc comment reaches the emitted
+         * declaration.
+         */
+        public cache?: RedisCache,
+    ) {
         this.logger = (this.cache as any).logger;
         this.redis = (RedisCache as any).redis;
         this.key = (this.cache as any).key.bind(this.cache);
@@ -46,8 +110,20 @@ export class TagCache {
      * returns a single result, otherwise it will return an array of results
      * associated with the keys
      *
-     * @param {string[]} keys
-     * @return Promise<any | null | Array<any | null>>
+     * Values are JSON-decoded on the way out, so what comes back is what was
+     * passed to {@link TagCache.set}, not a string.
+     *
+     * A redis failure is not thrown: it is logged as a warning and reported as
+     * `null`. That makes `null` ambiguous between "not cached" and "lookup
+     * failed", which is the right trade for a cache but means it must never be
+     * treated as proof that a value is absent.
+     *
+     * @param keys - one or more unprefixed keys to read
+     * @returns the decoded value for a single key, an array of values in the
+     *          order the keys were given for several, or `null` — per element
+     *          for a miss, or as the whole result on error
+     * @throws TypeError when there is no redis connection — see
+     *         {@link REDIS_INIT_ERROR}
      */
     public async get(...keys: string[]): Promise<any | null | (any | null)[]> {
         if (!this.redis) {
@@ -76,10 +152,24 @@ export class TagCache {
     /**
      * Stores given value under a given key, tagging it with the given tags
      *
-     * @param {string} key - name of the key to store data under
-     * @param {any} value - data to store in cache
-     * @param {string[]} tags - tag strings to mark data with
-     * @param {number} [ttl] - TTL in milliseconds
+     * The value is JSON-encoded, and the key is added to one redis set per tag
+     * so {@link TagCache.invalidate} can find it later. Everything happens in a
+     * single `MULTI`, so a value is never visible without its tag membership.
+     *
+     * When `ttl` is given it is applied to the value AND refreshed on each tag
+     * set, so tag sets do not outlive the entries they track. Without it,
+     * nothing expires and the entry lives until it is invalidated.
+     *
+     * @param key - unprefixed key to store the value under
+     * @param value - data to store; must be JSON-serialisable
+     * @param tags - tags to mark the value with; any one of them can later
+     *               invalidate it. An empty array stores the value with no tag,
+     *               which makes it unreachable by {@link TagCache.invalidate}.
+     * @param ttl - optional time to live, in MILLISECONDS
+     * @returns `true` once the write is committed, `false` if redis rejected it
+     *          — the error is logged rather than thrown
+     * @throws TypeError when there is no redis connection — see
+     *         {@link REDIS_INIT_ERROR}
      */
     public async set<_T = any>(
         key: string,
@@ -125,8 +215,28 @@ export class TagCache {
     /**
      * Invalidates data under given tags
      *
-     * @param {string[]} tags
-     * @return {Promise<boolean>}
+     * Collects every key held by the given tags, deletes those keys, and then
+     * removes them from all other tag sets so no tag is left pointing at a key
+     * that no longer exists.
+     *
+     * Two properties worth knowing, because neither is obvious from the
+     * signature:
+     *
+     * - **It resolves before the work is confirmed.** The deletion is dispatched
+     *   as a `MULTI` whose result is not awaited — a failure is logged, not
+     *   returned. So a `true` result means "the invalidation was issued", not
+     *   "the keys are gone". Do not use it to order a subsequent read.
+     * - **The cleanup pass scans every tag**, not just the ones passed in, since
+     *   a key may be held by tags other than those being invalidated. Cost
+     *   therefore grows with the total number of tags in the keyspace rather
+     *   than with the size of `tags`.
+     *
+     * @param tags - one or more tags whose data should be dropped
+     * @returns `true` if the invalidation was issued, including the case where
+     *          the tags held no keys at all; `false` only if collecting the keys
+     *          failed, which is logged rather than thrown
+     * @throws TypeError when there is no redis connection — see
+     *         {@link REDIS_INIT_ERROR}
      */
     public async invalidate(...tags: string[]): Promise<boolean> {
         if (!this.redis) {
@@ -205,6 +315,16 @@ export class TagCache {
 
     /**
      * Destroys this cache instance
+     *
+     * Note the connection is owned by `RedisCache` and shared, so this closes it
+     * for **every** consumer, not just this instance — including other
+     * `TagCache` objects built from the same cache. Treat it as application
+     * shutdown rather than as releasing one instance.
+     *
+     * Afterwards this instance keeps no redis reference, so every operation on
+     * it throws a `TypeError` carrying {@link REDIS_INIT_ERROR}.
+     *
+     * @returns once the shared redis connection has been closed
      */
     public async destroy(): Promise<void> {
         await RedisCache.destroy();
