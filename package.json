@@ -30,7 +30,7 @@
   "author": "imqueue.com <support@imqueue.com>",
   "license": "GPL-3.0-only",
   "dependencies": {
-    "@imqueue/rpc": "^3.4.1",
+    "@imqueue/rpc": "^3.7.1",
     "ioredis": "^5.11.1"
   },
   "devDependencies": {
