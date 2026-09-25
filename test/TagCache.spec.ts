@@ -22,17 +22,27 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
 import { RedisCache } from '@imqueue/rpc';
-import { REDIS_INIT_ERROR, TagCache } from '../index.js';
+import { INVALIDATE_BATCH, REDIS_INIT_ERROR, TagCache } from '../index.js';
 
 /**
  * Minimal in-memory stand-in for the ioredis client surface TagCache uses:
- * get/mget, multi (set/sadd/pexpire/del/srem + exec), smembers and scan.
+ * get/mget, multi (set/sadd/pexpire/del/srem + exec) and sscan. `commands`
+ * records every command a MULTI sent, so a test can read its size.
  */
 function fakeRedis() {
     const strings = new Map<string, string>();
     const sets = new Map<string, Set<string>>();
+    const commands: any[][] = [];
+    const hooks: { onScan?: () => void } = {};
 
-    const applyOp = ([cmd, ...args]: any[]): void => {
+    const applyOp = ([cmd, ...args]: any[]): [null, any] => {
+        commands.push([cmd, ...args]);
+        apply([cmd, ...args]);
+
+        return [null, 'OK'];
+    };
+
+    const apply = ([cmd, ...args]: any[]): void => {
         switch (cmd) {
             case 'set':
                 strings.set(args[0], args[1]);
@@ -66,6 +76,8 @@ function fakeRedis() {
     return {
         strings,
         sets,
+        commands,
+        hooks,
         async get(key: string) {
             return strings.get(key) ?? null;
         },
@@ -79,7 +91,7 @@ function fakeRedis() {
                 {
                     get: (_, cmd: string) => {
                         if (cmd === 'exec') {
-                            return async () => ops.forEach(applyOp);
+                            return async () => ops.map(applyOp);
                         }
                         return (...args: any[]) => {
                             ops.push([cmd, ...args]);
@@ -90,11 +102,16 @@ function fakeRedis() {
             );
             return chain;
         },
-        smembers(key: string, cb: (err: any, reply: string[]) => void) {
-            cb(null, [...(sets.get(key) || [])]);
-        },
-        async scan() {
-            return ['0', [...sets.keys()]];
+        // always pages from the front, which holds because a batch removes
+        // what it read; `onScan` runs after the page is taken, as a write
+        // racing the scan would
+        async sscan(key: string, _cursor: string, _: 'COUNT', count: number) {
+            const members = [...(sets.get(key) || [])];
+            const page = members.slice(0, count);
+
+            hooks.onScan?.();
+
+            return [members.length > count ? '1' : '0', page];
         },
     };
 }
@@ -233,12 +250,83 @@ describe('TagCache', () => {
 
         it('should not throw, but return false on redis errors', async () => {
             await cache.set('one', 1, ['t1']);
-            (redis as any).smembers = () => {
+            (redis as any).sscan = () => {
                 throw new Error('boom');
             };
             cache.logger = { ...console, warn: () => undefined } as any;
 
             assert.equal(await cache.invalidate('t1'), false);
+        });
+
+        it('should return false when a command inside a batch fails', async () => {
+            await cache.set('one', 1, ['t1']);
+            (redis as any).multi = () => {
+                const chain: any = {
+                    del: () => chain,
+                    srem: () => chain,
+                    exec: async () => [
+                        [new Error('READONLY'), null],
+                        [null, 1],
+                    ],
+                };
+                return chain;
+            };
+            cache.logger = { ...console, warn: () => undefined } as any;
+
+            assert.equal(await cache.invalidate('t1'), false);
+        });
+
+        it('should delete a large tag in bounded batches', async () => {
+            const count = INVALIDATE_BATCH * 2 + 500;
+
+            for (let i = 0; i < count; i++) {
+                await cache.set(`k${i}`, i, ['big']);
+            }
+
+            redis.commands.length = 0;
+            assert.equal(await cache.invalidate('big'), true);
+
+            assert.equal(redis.strings.size, 0);
+            assert.equal(redis.sets.get('ns:tag:big')?.size ?? 0, 0);
+            assert.ok(
+                redis.commands.every(
+                    ([, ...args]) => args.length <= INVALIDATE_BATCH + 1,
+                ),
+            );
+        });
+
+        it('should not touch tags other than the invalidated ones', async () => {
+            for (let i = 0; i < 50; i++) {
+                await cache.set(`k${i}`, i, ['shared', `own:${i}`]);
+            }
+
+            redis.commands.length = 0;
+            assert.equal(await cache.invalidate('shared'), true);
+
+            assert.ok(
+                redis.commands.every(
+                    ([cmd, first]) =>
+                        cmd === 'del' || first === 'ns:tag:shared',
+                ),
+            );
+            // a stale member is left behind, and invalidating it is harmless
+            assert.ok(redis.sets.get('ns:tag:own:7')?.has('ns:k7'));
+            assert.equal(await cache.invalidate('own:7'), true);
+            assert.equal(redis.sets.get('ns:tag:own:7')?.size, 0);
+        });
+
+        it('should keep a value cached during the invalidation tagged', async () => {
+            await cache.set('old', 1, ['t1']);
+            redis.hooks.onScan = () => {
+                redis.hooks.onScan = undefined;
+                void cache.set('fresh', 2, ['t1']);
+            };
+
+            assert.equal(await cache.invalidate('t1'), true);
+
+            assert.equal(await cache.get('old'), null);
+            assert.equal(await cache.get('fresh'), 2);
+            assert.ok(redis.sets.get('ns:tag:t1')?.has('ns:fresh'));
         });
     });
 });

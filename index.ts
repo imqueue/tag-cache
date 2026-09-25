@@ -37,8 +37,8 @@
  * Reads and writes never throw on a Redis failure — they log and report it in
  * the return value, so an outage degrades to cache misses. Note that
  * {@link TagCache.get} returning `null` therefore means "not cached OR lookup
- * failed", and {@link TagCache.invalidate} resolves once the work is ISSUED, not
- * once the keys are gone.
+ * failed". {@link TagCache.invalidate} resolves once the tagged keys are gone,
+ * working through a tag in bounded batches however large it is.
  *
  * @example
  * ```typescript
@@ -62,6 +62,13 @@ import { type ChainableCommander, type Redis } from 'ioredis';
  * {@link TagCache.destroy} has already been called on this instance.
  */
 export const REDIS_INIT_ERROR = 'Redis engine is not initialized!';
+
+/**
+ * How many members of a tag set {@link TagCache.invalidate} reads and deletes
+ * per round trip. A `COUNT` hint to `SSCAN`, so a batch may come back somewhat
+ * larger or smaller.
+ */
+export const INVALIDATE_BATCH = 1000;
 
 /**
  * Tagged cache over redis: values are stored under their own keys, and each key
@@ -247,26 +254,30 @@ export class TagCache {
     /**
      * Invalidates data under given tags
      *
-     * Collects every key held by the given tags, deletes those keys, and then
-     * removes them from all other tag sets so no tag is left pointing at a key
-     * that no longer exists.
+     * Walks each given tag's set in batches of {@link INVALIDATE_BATCH}
+     * members, deleting those keys and removing them from that tag, one
+     * awaited `MULTI` per batch. Memory and command size are bounded by the
+     * batch, whatever the size of the tag or of the keyspace.
      *
-     * Two properties worth knowing, because neither is obvious from the
+     * Three properties worth knowing, because none is obvious from the
      * signature:
      *
-     * - **It resolves before the work is confirmed.** The deletion is dispatched
-     *   as a `MULTI` whose result is not awaited — a failure is logged, not
-     *   returned. So a `true` result means "the invalidation was issued", not
-     *   "the keys are gone". Do not use it to order a subsequent read.
-     * - **The cleanup pass scans every tag**, not just the ones passed in, since
-     *   a key may be held by tags other than those being invalidated. Cost
-     *   therefore grows with the total number of tags in the keyspace rather
-     *   than with the size of `tags`.
+     * - **It resolves once the keys are gone.** Every batch is awaited, so a
+     *   `true` result means the tagged values have been deleted.
+     * - **Other tags are not scrubbed.** A deleted key may still be a member of
+     *   a tag that was not invalidated. That is harmless — invalidating that tag
+     *   later deletes a key that no longer exists, and a tag set given a ttl
+     *   expires with it. Scrubbing every tag here costs tags x keys, which is
+     *   what took a service's heap from 564MB to 15GB on one invalidation of a
+     *   tag holding 15,000 keys in a keyspace of 3,000 tags.
+     * - **A value cached during the invalidation stays tagged.** Only the
+     *   members that were scanned are removed from the tag, so a later
+     *   invalidation still reaches anything added meanwhile.
      *
      * @param tags - one or more tags whose data should be dropped
-     * @returns `true` if the invalidation was issued, including the case where
-     *          the tags held no keys at all; `false` only if collecting the keys
-     *          failed, which is logged rather than thrown
+     * @returns `true` once every tagged key is deleted, including the case where
+     *          the tags held no keys at all; `false` if redis failed part-way,
+     *          which is logged rather than thrown
      * @throws TypeError when there is no redis connection — see
      *         {@link REDIS_INIT_ERROR}
      */
@@ -276,63 +287,9 @@ export class TagCache {
         }
 
         try {
-            const tagKeys = tags.map(tag => this.key(`tag:${tag}`));
-            const keys: string[] = [
-                ...new Set(
-                    ([] as string[]).concat(
-                        ...((await Promise.all(
-                            tagKeys.map(tag => {
-                                const redis = this.redis;
-
-                                if (!redis) {
-                                    throw new TypeError(REDIS_INIT_ERROR);
-                                }
-
-                                return new Promise(resolve => {
-                                    redis.smembers(tag, (_, reply) =>
-                                        resolve(reply),
-                                    );
-                                });
-                            }),
-                        )) as unknown as string[]),
-                    ),
-                ),
-            ];
-
-            if (!keys.length) {
-                // nothing to do, no keys found
-                return true;
+            for (const tag of new Set(tags)) {
+                await this.drop(this.key(`tag:${tag}`));
             }
-
-            const multi: ChainableCommander = this.redis.multi();
-            let cursor = '0';
-
-            multi.del(...keys);
-
-            do {
-                const reply = await this.redis.scan(
-                    cursor,
-                    'MATCH',
-                    this.key('tag:*'),
-                    'COUNT',
-                    '1000',
-                );
-
-                cursor = reply[0];
-
-                for (const tag of reply[1]) {
-                    multi.srem(tag, ...keys);
-                }
-            } while (cursor !== '0');
-
-            multi
-                .exec()
-                .catch(err =>
-                    this.logger.warn(
-                        'TagCache: invalidate error:',
-                        (err as Error).stack,
-                    ),
-                );
 
             return true;
         } catch (err) {
@@ -343,6 +300,47 @@ export class TagCache {
 
             return false;
         }
+    }
+
+    /**
+     * Deletes every key held by one tag set, a batch at a time.
+     *
+     * @param tagKey - fully-qualified key of the tag set
+     */
+    private async drop(tagKey: string): Promise<void> {
+        let cursor = '0';
+
+        do {
+            const redis = this.redis;
+
+            if (!redis) {
+                throw new TypeError(REDIS_INIT_ERROR);
+            }
+
+            const [next, keys] = await redis.sscan(
+                tagKey,
+                cursor,
+                'COUNT',
+                INVALIDATE_BATCH,
+            );
+
+            cursor = next;
+
+            if (keys.length) {
+                // exec() resolves with per-command errors instead of rejecting
+                const failed = (
+                    await redis
+                        .multi()
+                        .del(...keys)
+                        .srem(tagKey, ...keys)
+                        .exec()
+                )?.find(([err]) => err);
+
+                if (failed) {
+                    throw failed[0];
+                }
+            }
+        } while (cursor !== '0');
     }
 
     /**
