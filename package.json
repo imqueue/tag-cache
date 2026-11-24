@@ -1,6 +1,6 @@
 {
   "name": "@imqueue/tag-cache",
-  "version": "3.0.13",
+  "version": "3.0.14",
   "description": "Tagged Cache implementation over redis",
   "keywords": [],
   "scripts": {
